@@ -49,6 +49,14 @@ Edit the `messages` block at the top of `profiles.json`. `{time}` becomes `06:00
 
 Keep `say ` at the start of each line (or use `tellraw` / `title`). A pack can override these with its own `messages` object.
 
+## Discord webhook
+
+Same lines also post to Discord (T, warnings, restart, online).
+
+Paste the webhook URL in `profiles.json` as `discordWebhook`, or put it alone in a `discord.webhook` file next to the timer (that file is gitignored).
+
+Leave `discordWebhook` empty if you do not want Discord.
+
 ## Adding another pack
 
 Copy a profile in `profiles.json` and set:

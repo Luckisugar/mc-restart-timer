@@ -1,5 +1,6 @@
 {
   "activeProfile": "infinity-legacy-ii",
+  "discordWebhook": "",
   "messages": {
     "test": "say MCRT Test.",
     "warn15": "say Restart!! 15 min ({time}).",

@@ -742,6 +742,51 @@ function Get-ChatMessage($Profile, [string]$Key, [datetime]$At) {
     "say $trim"
 }
 
+function Get-DiscordWebhook($Profile) {
+    $url = Get-JsonProp $Profile "discordWebhook"
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        $url = Get-JsonProp $script:Config "discordWebhook"
+    }
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        $file = Join-Path $Root "discord.webhook"
+        if (Test-Path $file) {
+            $url = (Get-Content -Raw -Path $file -Encoding UTF8).Trim()
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($url)) { return $null }
+    if ($url -notmatch "^https://(discord|discordapp)\.com/api/webhooks/") { return $null }
+    $url
+}
+
+function Send-Discord($Profile, [string]$Text) {
+    $url = Get-DiscordWebhook $Profile
+    if (-not $url -or [string]::IsNullOrWhiteSpace($Text)) { return }
+    $clean = $Text.Trim()
+    if ($clean -match "^say\s+") { $clean = $clean.Substring(4).Trim() }
+    elseif ($clean -match "^(tellraw|title)\b") { return }
+    try {
+        $pack = [string]$Profile.name
+        $payload = @{
+            username = "MC Restart Timer"
+            content  = "**$pack**`n$clean"
+        } | ConvertTo-Json -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($payload)
+        Invoke-RestMethod -Uri $url -Method Post -Body $bytes -ContentType "application/json; charset=utf-8" -TimeoutSec 5 | Out-Null
+    } catch {
+        Write-Log ("Discord webhook failed: " + $_.Exception.Message)
+    }
+}
+
+function Send-Announce($Profile, [string]$Key, [datetime]$At) {
+    $msg = Get-ChatMessage $Profile $Key $At
+    $ok = $false
+    if ($msg) {
+        $ok = [bool](Send-ServerLine $msg)
+        Send-Discord $Profile $msg
+    }
+    $ok
+}
+
 function Close-DeadServerWindow {
     $hwnd = $script:TargetHwnd
     if ($hwnd -eq [IntPtr]::Zero -or -not [McWin]::IsWindow($hwnd)) { return }
@@ -854,8 +899,7 @@ function Invoke-RestartSequence($Profile) {
     $slot = Get-NextTarget $Profile
     if ($slot -and -not $script:ForcedTarget) { $script:CompletedTargets.Add($slot) }
     try {
-        $nowMsg = Get-ChatMessage $Profile "restartNow" (Get-Date)
-        if ($nowMsg) { [void](Send-ServerLine $nowMsg) }
+        [void](Send-Announce $Profile "restartNow" (Get-Date))
         [void](Send-ServerLine "save-all flush")
         Start-Sleep -Seconds ([int]$Profile.saveFlushSeconds)
         [void](Send-ServerLine "stop")
@@ -899,8 +943,7 @@ function Invoke-RestartSequence($Profile) {
                 $waited = ((Get-Date) - $waitStart).TotalSeconds
                 if ($script:Connected -and -not $onlineSent -and ($script:JavaAlive -or $waited -ge 25)) {
                     Start-Sleep -Seconds 8
-                    $online = Get-ChatMessage $Profile "online" (Get-Date)
-                    if ($online) { [void](Send-ServerLine $online) }
+                    [void](Send-Announce $Profile "online" (Get-Date))
                     $onlineSent = $true
                     $script:LastStatus = "Connected"
                     Write-Log "Server is back."
@@ -961,7 +1004,7 @@ function Pump-Keys($Profile) {
                     $script:LastStatus = "Test failed (no window)"
                     break
                 }
-                $ok = Send-ServerLine (Get-ChatMessage $Profile "test" (Get-Date))
+                $ok = Send-Announce $Profile "test" (Get-Date)
                 $script:LastTestAt = Get-Date
                 if ($ok) {
                     $script:LastStatus = "TEST SENT  look in Minecraft chat"
@@ -1118,8 +1161,7 @@ function Invoke-TimerLoop($Profile) {
                 $secs = [int][Math]::Floor($remaining.TotalSeconds)
                 if ($secs -le $w -and ($w - $secs) -le 20) {
                     $script:FiredWarnings[$key] = $true
-                    $msg = Get-ChatMessage $Profile (Get-WarnMessageKey $w) $target
-                    if ($msg) { [void](Send-ServerLine $msg) }
+                    [void](Send-Announce $Profile (Get-WarnMessageKey $w) $target)
                 }
             }
 

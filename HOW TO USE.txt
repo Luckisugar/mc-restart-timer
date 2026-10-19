@@ -55,6 +55,13 @@ Keep "say " at the start of each line (or use tellraw / title).
 A pack can override these by adding its own "messages" object.
 
 
+Discord
+-------
+Same chat lines also post to Discord.
+Paste the webhook URL in profiles.json as "discordWebhook",
+or put the URL alone in a discord.webhook file next to the timer.
+
+
 Adding another pack
 -------------------
 Edit profiles.json. Copy a profile, set:
