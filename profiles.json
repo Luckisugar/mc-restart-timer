@@ -1,0 +1,62 @@
+{
+  "activeProfile": "infinity-legacy-ii",
+  "messages": {
+    "test": "say MCRT Test.",
+    "warn15": "say Restart!! 15 min ({time}).",
+    "warn5": "say Restart!! 5 min ({time}).",
+    "warn1": "say Restart!! 1 min ({time}).",
+    "warn10s": "say Restart!! 10 seconds.",
+    "restartNow": "say Restart!!!!!!!!!!!!!!!.",
+    "online": "say Server is online."
+  },
+  "profiles": [
+    {
+      "id": "infinity-legacy-ii",
+      "name": "Infinity Legacy II",
+      "enabled": true,
+      "windowTitleContains": ["infinity-legacy-ii", "Infinity Legacy II"],
+      "processMatch": "infinity-legacy-ii",
+      "restartTimes": ["06:00", "12:00", "18:00", "00:00"],
+      "warningsSeconds": [900, 300, 60, 10],
+      "relaunch": true,
+      "workingDirectory": "C:\\Users\\drigotine\\Downloads\\Minecraft Server\\infinity-legacy-ii",
+      "startCommand": "run.bat",
+      "saveFlushSeconds": 10,
+      "settleSecondsAfterStop": 20,
+      "stopTimeoutSeconds": 180,
+      "bootTimeoutSeconds": 600
+    },
+    {
+      "id": "matcha-flavoured",
+      "name": "Matcha Flavoured",
+      "enabled": true,
+      "windowTitleContains": ["matcha-flavoured", "Matcha Flavoured"],
+      "processMatch": "matcha-flavoured",
+      "restartTimes": ["06:00", "12:00", "18:00", "00:00"],
+      "warningsSeconds": [900, 300, 60, 10],
+      "relaunch": true,
+      "workingDirectory": "C:\\Users\\drigotine\\Downloads\\Minecraft Server\\matcha-flavoured",
+      "startCommand": "start.bat",
+      "saveFlushSeconds": 8,
+      "settleSecondsAfterStop": 15,
+      "stopTimeoutSeconds": 90,
+      "bootTimeoutSeconds": 180
+    },
+    {
+      "id": "atm10",
+      "name": "All The Mods 10",
+      "enabled": false,
+      "windowTitleContains": ["atm10", "All The Mods"],
+      "processMatch": "atm10",
+      "restartTimes": ["06:00", "12:00", "18:00", "00:00"],
+      "warningsSeconds": [900, 300, 60, 10],
+      "relaunch": true,
+      "workingDirectory": "C:\\Users\\drigotine\\Downloads\\Minecraft Server\\atm10",
+      "startCommand": "startserver.bat",
+      "saveFlushSeconds": 10,
+      "settleSecondsAfterStop": 20,
+      "stopTimeoutSeconds": 180,
+      "bootTimeoutSeconds": 600
+    }
+  ]
+}

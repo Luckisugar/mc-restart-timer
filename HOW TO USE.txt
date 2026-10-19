@@ -1,0 +1,73 @@
+MC Restart Timer
+================
+
+Desktop folder. Double-click START TIMER.bat.
+
+The timer is its own window. It finds your Minecraft *console* window and
+types commands into it (say / save-all / stop), like you typing by hand.
+No RCON.
+
+
+First time
+----------
+1. Have the server console already open (the cmd/terminal running the pack).
+2. Start the timer from START TIMER.bat (its own window, not a Terminal tab).
+3. Pick the pack with 1 / 2. A wrong number stays on that menu.
+4. Window picker: click the live Minecraft console, or use the numbered list.
+   Green lines are windows that already have that pack's Java running.
+   Number + P flashes the window so you can see which one it is.
+5. Dashboard must say ARMED. Press T — a chat ping must show in Minecraft.
+   If chat does not appear, press W and click the server console again.
+
+
+Keys
+----
+  T  test chat — types a say into the bound window. If you see it in-game, it works.
+  S  skip the next scheduled restart
+  R  restart now (10 second warning, then save + stop)
+  P  pause / unpause the schedule
+  I  start this profile's server if it is down
+  W  pick the server window again
+  N  switch profile
+  Q  close the timer. The Minecraft server keeps running.
+
+
+Clock
+-----
+  06:00  12:00  18:00  00:00   (this PC's local time)
+  Warnings at 15 min, 5 min, 1 min, 10 seconds.
+
+
+Chat text
+---------
+Edit the "messages" block at the top of profiles.json.
+{time} becomes 06:00 / 12:00 / 18:00 / 00:00.
+
+  test        T key ping
+  warn15      15 minute warning
+  warn5       5 minute warning
+  warn1       1 minute warning
+  warn10s     10 second warning
+  restartNow  right before save + stop
+  online      after the server is back
+
+Keep "say " at the start of each line (or use tellraw / title).
+A pack can override these by adding its own "messages" object.
+
+
+Adding another pack
+-------------------
+Edit profiles.json. Copy a profile, set:
+  name, workingDirectory, startCommand
+  windowTitleContains  (text that appears in the console title bar)
+  processMatch         (text that appears in the java command line, usually the folder name)
+  enabled: true
+
+
+Notes
+-----
+- Keep the server in a normal console window (cmd, PowerShell, or Windows Terminal).
+- If the server is a tab in Windows Terminal, leave that tab selected.
+- After stop, run.bat may sit on "Press any key". The timer hits Enter for you, then opens a fresh console.
+- Closing the timer does not stop the game.
+- The timer briefly focuses the server window to type, then gives focus back.
