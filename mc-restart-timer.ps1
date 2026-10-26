@@ -126,6 +126,30 @@ $script:LastHeartbeat = [datetime]::MinValue
 $script:LastTestAt = [datetime]::MinValue
 $script:Config = $null
 $script:CurrentProfile = $null
+$script:LagWatch = $false
+$script:CrashWatch = $true
+$script:CrashTimes = New-Object System.Collections.Generic.List[datetime]
+$script:LogJustAttached = $false
+$script:HandledDeadLine = ""
+$script:JavaWasAlive = $false
+$script:PendingCrashLine = ""
+$script:CrashCooldownUntil = [datetime]::MinValue
+$script:HostileClear = $false
+$script:LagPhase = "off"
+$script:LagPhaseStart = [datetime]::MinValue
+$script:LagLastOverload = [datetime]::MinValue
+$script:LagRoastSent = @{}
+$script:LagClearSent = @{}
+$script:LagBackupUntil = [datetime]::MinValue
+$script:LagLogPath = ""
+$script:LagLogLength = [int64]0
+$script:LagPending = ""
+$script:LagRoastLines = @(
+    "say Something appears to be causing performance drops..."
+    "say What are you guys doing? i'm seeing significant performance drops"
+    "say Whoever built that farm, the server can feel it."
+    'say This is the "I''m about to do something stupid" warning.'
+)
 $script:DefaultMessages = @{
     test       = "say [Restart] ping from timer. If you see this, typing works."
     warn15     = "say Restart in 15 min ({time})."
@@ -350,9 +374,11 @@ function Wait-ClickWindow($Profile) {
     $null
 }
 
-function Select-ServerWindow($Profile) {
-    $restored = Restore-BindState $Profile
-    if ($restored) { return $restored }
+function Select-ServerWindow($Profile, [switch]$ForcePick) {
+    if (-not $ForcePick) {
+        $restored = Restore-BindState $Profile
+        if ($restored) { return $restored }
+    }
 
     $highlighted = 0
     while ($true) {
@@ -362,7 +388,9 @@ function Select-ServerWindow($Profile) {
 
         Clear-Host
         Write-Host ""
-        Write-Host "  WINDOW PICKER" -ForegroundColor Yellow
+        $pickerTitle = "WINDOW PICKER"
+        if ($ForcePick) { $pickerTitle = "RE-PICK WINDOW" }
+        Write-Host "  $pickerTitle" -ForegroundColor Yellow
         Write-Host "  Pack: $($Profile.name)" -ForegroundColor DarkGray
         Write-Host ""
         Write-Host "  Click the Minecraft server console now.  (30s)"
@@ -388,7 +416,11 @@ function Select-ServerWindow($Profile) {
             }
         }
         Write-Host ""
-        Write-Host "  [1-9] highlight   [P] preview flash   [Enter] bind   [Esc] skip"
+        if ($ForcePick) {
+            Write-Host "  [1-9] highlight   [P] preview flash   [Enter] bind   [Esc] keep current"
+        } else {
+            Write-Host "  [1-9] highlight   [P] preview flash   [Enter] bind   [Esc] skip"
+        }
 
         $original = [McWin]::GetForegroundWindow()
         $mine = [McWin]::GetConsoleWindow()
@@ -777,6 +809,405 @@ function Send-Discord($Profile, [string]$Text) {
     }
 }
 
+function Reset-LagCursor {
+    $script:LagLogPath = ""
+    $script:LagLogLength = [int64]0
+    $script:LagPending = ""
+    $script:LagPhase = "idle"
+    $script:LagPhaseStart = [datetime]::MinValue
+    $script:LagLastOverload = [datetime]::MinValue
+    $script:LagRoastSent = @{}
+    $script:LagClearSent = @{}
+    $script:LagBackupUntil = [datetime]::MinValue
+}
+
+function Get-LogStamp([string]$Line, [datetime]$Fallback) {
+    if ($Line -match '\[(\d{2})([A-Za-z]{3})(\d{4}) (\d{2}):(\d{2}):(\d{2})') {
+        $months = @{ Jan = 1; Feb = 2; Mar = 3; Apr = 4; May = 5; Jun = 6; Jul = 7; Aug = 8; Sep = 9; Oct = 10; Nov = 11; Dec = 12 }
+        $month = $months[$Matches[2]]
+        if ($month) {
+            return Get-Date -Year ([int]$Matches[3]) -Month $month -Day ([int]$Matches[1]) -Hour ([int]$Matches[4]) -Minute ([int]$Matches[5]) -Second ([int]$Matches[6])
+        }
+    }
+    $Fallback
+}
+
+function Read-NewLagLines($Profile) {
+    $dir = ""
+    if ($Profile -and $Profile.workingDirectory) { $dir = [string]$Profile.workingDirectory }
+    if ([string]::IsNullOrWhiteSpace($dir)) { return @() }
+    $path = Join-Path $dir "logs\latest.log"
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    $item = Get-Item -LiteralPath $path
+    if ($script:LagLogPath -ne $path -or [int64]$item.Length -lt $script:LagLogLength) {
+        $script:LagLogPath = $path
+        $script:LagLogLength = [int64]$item.Length
+        $script:LagPending = ""
+        $script:LogJustAttached = $true
+        Write-Log "Log watch attached at the end of latest.log."
+        return @()
+    }
+    if ([int64]$item.Length -eq $script:LagLogLength) { return @() }
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        [void]$fs.Seek($script:LagLogLength, [System.IO.SeekOrigin]::Begin)
+        $available = [int64]$fs.Length - [int64]$fs.Position
+        if ($available -le 0) { return @() }
+        if ($available -gt 1048576) { $available = 1048576 }
+        $buf = New-Object byte[] ([int]$available)
+        $read = $fs.Read($buf, 0, $buf.Length)
+        $script:LagLogLength = [int64]$fs.Position
+        if ($read -le 0) { return @() }
+        $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
+    } catch {
+        Write-Log ("Lag watch could not read the log: " + $_.Exception.Message)
+        return @()
+    } finally {
+        if ($fs) { $fs.Dispose() }
+    }
+    $chunk = $script:LagPending + ($text -replace "`r", "")
+    $script:LagPending = ""
+    $parts = @($chunk -split "`n", -1)
+    if ($chunk.EndsWith("`n")) {
+        if ($parts.Length -gt 0 -and $parts[-1] -eq "") {
+            if ($parts.Length -eq 1) { return @() }
+            $parts = $parts[0..($parts.Length - 2)]
+        }
+    } else {
+        $script:LagPending = [string]$parts[-1]
+        if ($parts.Length -le 1) { return @() }
+        $parts = $parts[0..($parts.Length - 2)]
+    }
+    @($parts | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Start-LagRoast([datetime]$Now) {
+    $script:LagPhase = "roast"
+    $script:LagPhaseStart = $Now
+    $script:LagRoastSent = @{}
+    Write-Log "Overload pair. 90s warning started."
+}
+
+function Start-LagCountdown([datetime]$Now) {
+    $script:LagPhase = "countdown"
+    $script:LagPhaseStart = $Now
+    $script:LagClearSent = @{}
+    $what = "items"
+    if ($script:HostileClear) { $what = "items and hostiles" }
+    Write-Log "Still overloaded. Clear of $what in 60s."
+}
+
+function Add-LagLogLine([string]$Line, [datetime]$Now) {
+    if ($Line -match 'Server Backup started|launched a manual backup') {
+        $script:LagBackupUntil = $Now.AddMinutes(4)
+        Write-Log "Backup started. Ignoring overload lines for 4 min."
+        if ($script:LagPhase -eq "roast") {
+            $script:LagPhase = "idle"
+            $script:LagLastOverload = [datetime]::MinValue
+            $script:LagRoastSent = @{}
+            Write-Log "Lag roast cancelled. A backup is running."
+        }
+        return
+    }
+    if ($Line -match 'Server backup done|Backup complete!') {
+        $until = $Now.AddSeconds(45)
+        if ($until -gt $script:LagBackupUntil) { $script:LagBackupUntil = $until }
+        return
+    }
+    if ($Line -notmatch 'MinecraftServer/\]: Can''t keep up!' -or $Line -notmatch 'overloaded') { return }
+    $stamp = Get-LogStamp $Line $Now
+    if (($Now - $stamp).TotalSeconds -gt 150) { return }
+    if ($script:LagBackupUntil -gt [datetime]::MinValue -and $stamp -lt $script:LagBackupUntil) { return }
+    if ($script:LagPhase -eq "cooldown" -and $Now -lt $script:LagPhaseStart.AddSeconds(300)) { return }
+    if ($script:LagPhase -eq "countdown") { return }
+
+    if ($script:LagPhase -eq "roast") {
+        Start-LagCountdown $Now
+        return
+    }
+    $gap = 9999.0
+    if ($script:LagLastOverload -gt [datetime]::MinValue) {
+        $gap = ($stamp - $script:LagLastOverload).TotalSeconds
+    }
+    $script:LagLastOverload = $stamp
+    if ($gap -ge 10 -and $gap -le 120) { Start-LagRoast $Now }
+}
+
+function Get-ClearSay([int]$Seconds) {
+    if ($script:HostileClear) {
+        return "say Alright guys performance is still bad i'm going to clear items and hostile entities. ITEM CLEAR IN ${Seconds}s"
+    }
+    "say Right, imma do something about this performance drop. ITEM CLEAR IN ${Seconds}s"
+}
+
+function Get-LagDueLines([datetime]$Now) {
+    $due = New-Object System.Collections.Generic.List[string]
+    if ($script:LagPhase -eq "cooldown" -and $Now -ge $script:LagPhaseStart.AddSeconds(300)) {
+        $script:LagPhase = "idle"
+        $script:LagLastOverload = [datetime]::MinValue
+        Write-Log "Lag watch cooldown ended."
+    }
+    if ($script:LagPhase -eq "roast") {
+        $elapsed = ($Now - $script:LagPhaseStart).TotalSeconds
+        $marks = @(0, 25, 50, 75)
+        for ($i = 0; $i -lt $marks.Count; $i++) {
+            $key = "$($marks[$i])"
+            if ($elapsed -ge $marks[$i] -and -not $script:LagRoastSent.ContainsKey($key)) {
+                $script:LagRoastSent[$key] = $true
+                [void]$due.Add($script:LagRoastLines[$i])
+            }
+        }
+        if ($elapsed -ge 90) {
+            $script:LagPhase = "idle"
+            $script:LagLastOverload = [datetime]::MinValue
+            $script:LagRoastSent = @{}
+            Write-Log "90s passed with no further overload."
+        }
+    } elseif ($script:LagPhase -eq "countdown") {
+        $elapsed = ($Now - $script:LagPhaseStart).TotalSeconds
+        foreach ($mark in @(
+            @{ Key = "60"; At = 0;  Secs = 60 }
+            @{ Key = "40"; At = 20; Secs = 40 }
+            @{ Key = "20"; At = 40; Secs = 20 }
+            @{ Key = "5";  At = 55; Secs = 5 }
+        )) {
+            if ($elapsed -ge $mark.At -and -not $script:LagClearSent.ContainsKey($mark.Key)) {
+                $script:LagClearSent[$mark.Key] = $true
+                [void]$due.Add((Get-ClearSay $mark.Secs))
+            }
+        }
+        if ($elapsed -ge 60 -and -not $script:LagClearSent.ContainsKey("kill")) {
+            $script:LagClearSent["kill"] = $true
+            [void]$due.Add("kill @e[type=item]")
+            if ($script:HostileClear) { [void]$due.Add("infinityclearhostiles") }
+            $script:LagPhase = "cooldown"
+            $script:LagPhaseStart = $Now
+            $script:LagLastOverload = [datetime]::MinValue
+            Write-Log "Item clear sent. Ignoring overload lines for 5 min."
+        }
+    }
+    @($due)
+}
+
+function Test-ServerDeadLine([string]$Line) {
+    $Line -match 'MinecraftServer/\]: Encountered an unexpected exception' -or
+        $Line -match 'MinecraftServer/\]: This crash report has been saved to:' -or
+        $Line -match 'NeoForgeMod/\]: Preparing crash report'
+}
+
+function Get-LatestDeadLine($Profile) {
+    $dir = ""
+    if ($Profile -and $Profile.workingDirectory) { $dir = [string]$Profile.workingDirectory }
+    if ([string]::IsNullOrWhiteSpace($dir)) { return $null }
+    $path = Join-Path $dir "logs\latest.log"
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $take = [Math]::Min([int64]$fs.Length, 2097152)
+        if ($take -le 0) { return $null }
+        [void]$fs.Seek($fs.Length - $take, [System.IO.SeekOrigin]::Begin)
+        $buf = New-Object byte[] ([int]$take)
+        $read = $fs.Read($buf, 0, $buf.Length)
+        if ($read -le 0) { return $null }
+        $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read) -replace "`r", ""
+    } catch {
+        Write-Log ("Crash watch could not read the log tail: " + $_.Exception.Message)
+        return $null
+    } finally {
+        if ($fs) { $fs.Dispose() }
+    }
+    $found = $null
+    foreach ($line in ($text -split "`n")) {
+        if (Test-ServerDeadLine $line) { $found = $line }
+    }
+    $found
+}
+
+function Stop-HungServerJava($Profile) {
+    $killed = $false
+    if ($script:TargetPid -gt 0) {
+        $tree = Get-ProcessTree
+        foreach ($c in @(Get-Descendants $tree ([int]$script:TargetPid))) {
+            $name = [string]$c.Name
+            if ($name -ne "java.exe" -and $name -ne "javaw.exe") { continue }
+            try {
+                Stop-Process -Id ([int]$c.ProcessId) -Force -ErrorAction Stop
+                Write-Log ("Stopped hung Java " + $c.ProcessId)
+                $killed = $true
+            } catch {
+                Write-Log ("Could not stop Java " + $c.ProcessId)
+            }
+        }
+    }
+    if (-not $killed) {
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -and $_.CommandLine -match 'neoforge/21\.1\.248'
+        })
+        foreach ($p in $procs) {
+            try {
+                Stop-Process -Id ([int]$p.ProcessId) -Force -ErrorAction Stop
+                Write-Log ("Stopped hung Java " + $p.ProcessId)
+                $killed = $true
+            } catch {
+                Write-Log ("Could not stop Java " + $p.ProcessId)
+            }
+        }
+    }
+    $killed
+}
+
+function Update-CrashTimes([datetime]$Now) {
+    $kept = New-Object System.Collections.Generic.List[datetime]
+    foreach ($t in @($script:CrashTimes)) {
+        if (($Now - $t).TotalMinutes -lt 15) { [void]$kept.Add($t) }
+    }
+    $script:CrashTimes = $kept
+    $kept.Count
+}
+
+function Test-BootAfterDeadLine($Profile, [string]$DeadLine) {
+    if (-not (Test-JavaAlive $Profile)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($DeadLine)) { return $false }
+    $dir = ""
+    if ($Profile -and $Profile.workingDirectory) { $dir = [string]$Profile.workingDirectory }
+    if ([string]::IsNullOrWhiteSpace($dir)) { return $false }
+    $path = Join-Path $dir "logs\latest.log"
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    $fs = $null
+    try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $take = [Math]::Min([int64]$fs.Length, 2097152)
+        if ($take -le 0) { return $false }
+        [void]$fs.Seek($fs.Length - $take, [System.IO.SeekOrigin]::Begin)
+        $buf = New-Object byte[] ([int]$take)
+        $read = $fs.Read($buf, 0, $buf.Length)
+        if ($read -le 0) { return $false }
+        $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read) -replace "`r", ""
+    } catch {
+        return $false
+    } finally {
+        if ($fs) { $fs.Dispose() }
+    }
+    $deadAt = $text.LastIndexOf($DeadLine)
+    if ($deadAt -lt 0) { return $false }
+    $doneAt = $text.LastIndexOf("]: Done (")
+    $doneAt -gt $deadAt
+}
+
+function Get-CrashWatchLabel {
+    if (-not $script:CrashWatch) { return "OFF  press C" }
+    $now = Get-Date
+    if ($script:PendingCrashLine -and $script:CrashCooldownUntil -gt $now) {
+        $left = [int]($script:CrashCooldownUntil - $now).TotalSeconds
+        if ($left -lt 1) { $left = 1 }
+        return "ON  restart in ${left}s"
+    }
+    $recent = 0
+    foreach ($t in @($script:CrashTimes)) {
+        if (($now - $t).TotalMinutes -lt 15) { $recent++ }
+    }
+    if ($recent -eq 0) { return "ON" }
+    "ON  $recent in 15m"
+}
+
+function Update-LogWatch($Profile) {
+    if ($script:Busy) {
+        if ($script:LagPhase -in @("roast", "countdown")) {
+            $script:LagPhase = "idle"
+            $script:LagLastOverload = [datetime]::MinValue
+            $script:LagRoastSent = @{}
+            $script:LagClearSent = @{}
+            Write-Log "Lag watch holding. Restart is in progress."
+        }
+        return
+    }
+    $now = Get-Date
+    $crashLine = $null
+    foreach ($line in @(Read-NewLagLines $Profile)) {
+        if (Test-ServerDeadLine $line) { $crashLine = $line }
+        if ($script:LagWatch) { Add-LagLogLine $line $now }
+    }
+    $justAttached = $script:LogJustAttached
+    $script:LogJustAttached = $false
+    $javaUp = Test-JavaAlive $Profile
+    if (-not $crashLine -and $script:CrashWatch -and ($justAttached -or ($script:JavaWasAlive -and -not $javaUp))) {
+        $crashLine = Get-LatestDeadLine $Profile
+    }
+    $script:JavaWasAlive = $javaUp
+    if ($crashLine -and $crashLine -ne $script:HandledDeadLine -and $script:CrashWatch) {
+        $script:HandledDeadLine = $crashLine
+        $snippet = $crashLine
+        if ($snippet.Length -gt 140) { $snippet = $snippet.Substring($snippet.Length - 140) }
+        $recent = Update-CrashTimes $now
+        if ($recent -ge 3) {
+            if (-not $script:PendingCrashLine -or $script:CrashCooldownUntil -le $now) {
+                $script:CrashCooldownUntil = $now.AddSeconds(90)
+            }
+            $script:PendingCrashLine = $crashLine
+            Write-Log ("Server dead line. Restarting at " + $script:CrashCooldownUntil.ToString("HH:mm:ss") + ". " + $snippet)
+            $script:LastStatus = "Crash. Short wait"
+        } else {
+            $script:PendingCrashLine = ""
+            [void]$script:CrashTimes.Add($now)
+            Write-Log ("Server dead line. Restarting. " + $snippet)
+            Invoke-RestartSequence $Profile -FromCrash
+            return
+        }
+    }
+    if ($script:PendingCrashLine -and $script:CrashWatch -and $now -ge $script:CrashCooldownUntil) {
+        $pending = $script:PendingCrashLine
+        $script:PendingCrashLine = ""
+        if (Test-BootAfterDeadLine $Profile $pending) {
+            Write-Log "Dead line is already behind a new boot. Crash restart skipped."
+            $script:LastStatus = "Connected"
+        } else {
+            [void]$script:CrashTimes.Add($now)
+            Write-Log "Crash wait finished. Restarting."
+            Invoke-RestartSequence $Profile -FromCrash
+            return
+        }
+    }
+    if (-not $script:LagWatch) { return }
+    foreach ($cmd in @(Get-LagDueLines $now)) {
+        if (-not $script:Connected) {
+            Write-Log "Lag watch wanted to type, but no window is bound."
+            break
+        }
+        [void](Send-ServerLine $cmd)
+        if ($cmd -match "^say ") { Send-Discord $Profile $cmd }
+    }
+}
+
+function Get-LagWatchLabel {
+    $extra = ""
+    if ($script:HostileClear) { $extra = "  +hostiles" }
+    if (-not $script:LagWatch) {
+        if ($script:HostileClear) { return "OFF  hostiles armed, press L" }
+        return "OFF"
+    }
+    $now = Get-Date
+    switch ($script:LagPhase) {
+        "roast" {
+            $left = 90 - ($now - $script:LagPhaseStart).TotalSeconds
+            if ($left -lt 0) { $left = 0 }
+            return ("ROAST  {0:0}s left{1}" -f $left, $extra)
+        }
+        "countdown" {
+            $left = 60 - ($now - $script:LagPhaseStart).TotalSeconds
+            if ($left -lt 0) { $left = 0 }
+            return ("ITEM CLEAR  {0:0}s{1}" -f $left, $extra)
+        }
+        "cooldown" {
+            $left = 300 - ($now - $script:LagPhaseStart).TotalSeconds
+            if ($left -lt 0) { $left = 0 }
+            return ("cooldown  {0}{1}" -f (Format-Countdown ([timespan]::FromSeconds($left))), $extra)
+        }
+        default { return ("ON  watching{0}" -f $extra) }
+    }
+}
+
 function Send-Announce($Profile, [string]$Key, [datetime]$At) {
     $msg = Get-ChatMessage $Profile $Key $At
     $ok = $false
@@ -893,24 +1324,52 @@ function Wait-NewServerWindow($Profile, $LaunchInfo, [int]$TimeoutSeconds) {
     $null
 }
 
-function Invoke-RestartSequence($Profile) {
+function Invoke-RestartSequence($Profile, [switch]$FromCrash) {
     $script:Busy = $true
     $script:LastStatus = "Saving and stopping"
-    $slot = Get-NextTarget $Profile
-    if ($slot -and -not $script:ForcedTarget) { $script:CompletedTargets.Add($slot) }
+    if (-not $FromCrash) {
+        $slot = Get-NextTarget $Profile
+        if ($slot -and -not $script:ForcedTarget) { $script:CompletedTargets.Add($slot) }
+    }
     try {
-        [void](Send-Announce $Profile "restartNow" (Get-Date))
-        [void](Send-ServerLine "save-all flush")
-        Start-Sleep -Seconds ([int]$Profile.saveFlushSeconds)
-        [void](Send-ServerLine "stop")
-        Write-Log "Sent stop. Waiting for Java to exit."
-        $script:LastStatus = "Waiting for shutdown"
-        $deadline = (Get-Date).AddSeconds([int]$Profile.stopTimeoutSeconds)
+        if ($FromCrash) {
+            Write-Log "Crash line seen. Waiting for Java to exit."
+            $script:LastStatus = "Crash. Waiting for shutdown"
+            if ($script:LagPhase -in @("roast", "countdown")) {
+                $script:LagPhase = "idle"
+                $script:LagLastOverload = [datetime]::MinValue
+                $script:LagRoastSent = @{}
+                $script:LagClearSent = @{}
+            }
+        } else {
+            [void](Send-Announce $Profile "restartNow" (Get-Date))
+            [void](Send-ServerLine "save-all flush")
+            Start-Sleep -Seconds ([int]$Profile.saveFlushSeconds)
+            [void](Send-ServerLine "stop")
+            Write-Log "Sent stop. Waiting for Java to exit."
+            $script:LastStatus = "Waiting for shutdown"
+        }
+        $waitSeconds = [int]$Profile.stopTimeoutSeconds
+        if ($FromCrash) { $waitSeconds = 25 }
+        $deadline = (Get-Date).AddSeconds($waitSeconds)
         while ((Get-Date) -lt $deadline) {
             if (-not (Test-JavaAlive $Profile)) { break }
             Start-Sleep -Milliseconds 500
             Pump-Keys $Profile
             if ($script:Quit) { return }
+        }
+        if ($FromCrash -and (Test-JavaAlive $Profile)) {
+            Write-Log "Java stayed up after the crash. Stopping it."
+            [void](Stop-HungServerJava $Profile)
+            $killDeadline = (Get-Date).AddSeconds(15)
+            while ((Get-Date) -lt $killDeadline -and (Test-JavaAlive $Profile)) {
+                Start-Sleep -Milliseconds 400
+            }
+        }
+        if ($FromCrash -and (Test-JavaAlive $Profile)) {
+            Write-Log "Java is still running after the crash wait. Not starting a second server."
+            $script:LastStatus = "Crash. Java still up"
+            return
         }
         Close-DeadServerWindow
         $script:TargetHwnd = [IntPtr]::Zero
@@ -964,6 +1423,7 @@ function Invoke-RestartSequence($Profile) {
         Write-Log ("Restart sequence error: " + $_.Exception.Message)
         $script:LastStatus = "Error"
     } finally {
+        Reset-LagCursor
         $script:ForcedTarget = $null
         $script:FiredWarnings = @{}
         $script:Busy = $false
@@ -977,6 +1437,10 @@ function Pump-Keys($Profile) {
         if ($k -eq "Q") {
             $script:Quit = $true
             return
+        }
+        if ($k -eq "W") {
+            $script:PickWindow = $true
+            continue
         }
         if ($script:Busy) { continue }
         switch ($k) {
@@ -1033,8 +1497,44 @@ function Pump-Keys($Profile) {
                     $script:LastStatus = "Starting server"
                 }
             }
-            "W" {
-                $script:PickWindow = $true
+            "L" {
+                $script:LagWatch = -not $script:LagWatch
+                if ($script:LagWatch) {
+                    Reset-LagCursor
+                    Write-Log "Lag watch ON. Only new Can't keep up lines count."
+                    $script:LastStatus = "Lag watch on"
+                } else {
+                    $script:LagPhase = "off"
+                    Write-Log "Lag watch OFF."
+                    $script:LastStatus = "Lag watch off"
+                }
+            }
+            "C" {
+                $script:CrashWatch = -not $script:CrashWatch
+                if ($script:CrashWatch) {
+                    $script:CrashTimes.Clear()
+                    $script:HandledDeadLine = ""
+                    $script:PendingCrashLine = ""
+                    $script:CrashCooldownUntil = [datetime]::MinValue
+                    $script:LogJustAttached = $true
+                    Write-Log "Crash watch ON. A dead server line restarts it."
+                    $script:LastStatus = "Crash watch on"
+                } else {
+                    Write-Log "Crash watch OFF."
+                    $script:LastStatus = "Crash watch off"
+                }
+            }
+            "H" {
+                $script:HostileClear = -not $script:HostileClear
+                if ($script:HostileClear) {
+                    Write-Log "Hostile clear ON. Same countdown also runs infinityclearhostiles."
+                    Write-Log "That command needs one /reload after today's script was added."
+                    if (-not $script:LagWatch) { Write-Log "Press L to start watching the log." }
+                    $script:LastStatus = "Hostile clear on"
+                } else {
+                    Write-Log "Hostile clear OFF. Item clear only."
+                    $script:LastStatus = "Hostile clear off"
+                }
             }
             "N" {
                 $script:Quit = $true
@@ -1075,16 +1575,18 @@ function Draw-Dashboard($Profile, $Target, $Remaining) {
         ("  Next    : {0}      {1}" -f $(if ($Target) { $Target.ToString("HH:mm") } else { "--:--" }), $eta)
         ("  Armed   : {0}" -f $armed)
         ("  Status  : {0}" -f $pauseText)
+        ("  Watch   : {0}" -f (Get-LagWatchLabel))
+        ("  Crash   : {0}" -f (Get-CrashWatchLabel))
         ("  Warns   : {0}" -f ($warnBits -join "  |  "))
         "-------------------------------------------------------------------------------"
         "  [T] TEST CHAT  types a say into the server, check in-game"
-        "  [S] skip next    [R] restart now    [P] pause    [W] pick window"
-        "  [I] start server [N] switch profile [Q] quit timer"
+        "  [S] skip next   [R] restart now   [P] pause   [W] pick window"
+        "  [L] lag  [H] hostiles  [C] crash watch  [I] start  [N] profile  [Q] quit"
         "-------------------------------------------------------------------------------"
         "  Log"
     )
     foreach ($log in $script:LogLines) { $lines += "    $log" }
-    while ($lines.Count -lt 24) { $lines += "" }
+    while ($lines.Count -lt 26) { $lines += "" }
     $lines += "==============================================================================="
 
     $i = 0
@@ -1097,6 +1599,14 @@ function Draw-Dashboard($Profile, $Target, $Remaining) {
             Write-Host $padded -ForegroundColor $connColor
         } elseif ($i -eq 8) {
             Write-Host $padded -ForegroundColor $armedColor
+        } elseif ($i -eq 10) {
+            $watchColor = "DarkGray"
+            if ($script:LagPhase -eq "countdown") { $watchColor = "Yellow" }
+            elseif ($script:LagWatch) { $watchColor = "Green" }
+            Write-Host $padded -ForegroundColor $watchColor
+        } elseif ($i -eq 11) {
+            $crashColor = if ($script:CrashWatch) { "Green" } else { "DarkGray" }
+            Write-Host $padded -ForegroundColor $crashColor
         } else {
             Write-Host $padded
         }
@@ -1114,6 +1624,7 @@ function Invoke-TimerLoop($Profile) {
     $script:CurrentProfile = $Profile
     $host.UI.RawUI.WindowTitle = "MC Restart Timer - $($Profile.name)"
     Write-Log "Profile $($Profile.name)"
+    Write-Log "Crash watch ON. A dead server line restarts it."
 
     $picked = Select-ServerWindow $Profile
     Bind-Window $picked
@@ -1126,8 +1637,13 @@ function Invoke-TimerLoop($Profile) {
 
         if ($script:PickWindow) {
             $script:PickWindow = $false
-            $picked = Select-ServerWindow $Profile
-            if ($picked) { Bind-Window $picked }
+            $picked = Select-ServerWindow $Profile -ForcePick
+            if ($picked) {
+                Bind-Window $picked
+                $script:LastStatus = "Window bound"
+            } else {
+                Write-Log "Window pick cancelled."
+            }
             Clear-Host
         }
 
@@ -1170,6 +1686,8 @@ function Invoke-TimerLoop($Profile) {
             }
         }
 
+        Update-LogWatch $Profile
+
         if (((Get-Date) - $script:LastHeartbeat).TotalMinutes -ge 10) {
             $script:LastHeartbeat = Get-Date
             Write-Log ("Heartbeat  next " + $(if ($target) { $target.ToString("HH:mm") } else { "--" }) + "  " + (Get-ArmedReason $Profile $target))
@@ -1179,6 +1697,8 @@ function Invoke-TimerLoop($Profile) {
         Start-Sleep -Milliseconds 800
     }
 }
+
+if ($MyInvocation.InvocationName -eq '.') { return }
 
 if (-not $Host.Name.Equals("ConsoleHost")) {
     Write-Host "Run START TIMER.bat so this stays in a console window."

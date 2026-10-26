@@ -27,7 +27,15 @@ Keys
   R  restart now (10 second warning, then save + stop)
   P  pause / unpause the schedule
   I  start this profile's server if it is down
-  W  pick the server window again
+  W  pick the server window again. Esc keeps the window you already have.
+  L  lag watch on/off. Two Can't keep up lines within 2 minutes start a 90s chat warning.
+     Another one before that ends starts an item clear countdown (60, 40, 20, 5).
+     Backups and lines already in the log are ignored. Stays off until you press L.
+  H  also clear hostile mobs on that same countdown. Needs one /reload so
+     infinityclearhostiles exists. The ender dragon and the wither are left alone.
+  C  crash watch on/off. On by default. A dead-server line in latest.log restarts
+     the server. It does not treat a normal stop as a crash. After 3 crash
+     restarts in 15 minutes, the next one waits 90 seconds. Press C to clear that.
   N  switch profile
   Q  close the timer. The Minecraft server keeps running.
 

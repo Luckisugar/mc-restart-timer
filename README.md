@@ -21,7 +21,10 @@ Double-click `START TIMER.bat`.
 | **R** | Restart now (10 second warning, then save + stop) |
 | **P** | Pause / unpause the schedule |
 | **I** | Start this profile's server if it is down |
-| **W** | Pick the server window again |
+| **W** | Pick the server window again. Esc keeps the current window |
+| **L** | Lag watch on/off. Two `Can't keep up` lines within 2 minutes start a 90s chat warning. Another one before that ends counts down an item clear (60, 40, 20, 5). Off until you press L |
+| **H** | Add a hostile clear to that same countdown. Needs one `/reload` so `infinityclearhostiles` exists. Skips the ender dragon and the wither |
+| **C** | Crash watch on/off. On by default. A dead-server line in `latest.log` restarts the server. A normal stop does not count. After 3 crash restarts in 15 minutes, the next one waits 90 seconds. Press C to clear that |
 | **N** | Switch profile |
 | **Q** | Close the timer. The Minecraft server keeps running |
 
